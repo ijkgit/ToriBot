@@ -1,0 +1,23 @@
+# 환경 변수
+.env
+
+# 쿠키
+cookies.txt
+
+# Node modules
+node_modules/
+
+# 로그
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
