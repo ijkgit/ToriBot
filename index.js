@@ -38,6 +38,12 @@ const client = new Client({
 
 const player = createAudioPlayer();
 
+// 현재 실행 중인 프로세스 추적
+let currentProcesses = {
+  ytdlp: null,
+  ffmpeg: null,
+};
+
 // 쿠키 파일 확인
 const hasCookies = fs.existsSync("./cookies.txt");
 if (hasCookies) {
@@ -86,82 +92,162 @@ const youtube = google.youtube({
 /* ===============================
    🎵 음악 재생 로직
 ================================ */
+function stopCurrentProcesses() {
+  console.log("🛑 [stopCurrentProcesses] 기존 프로세스 정리 시작");
+
+  // 플레이어 먼저 정지
+  if (player.state.status !== AudioPlayerStatus.Idle) {
+    console.log("🛑 [stopCurrentProcesses] 플레이어 정지");
+    player.stop(true);
+  }
+
+  // yt-dlp 프로세스 종료
+  if (currentProcesses.ytdlp && !currentProcesses.ytdlp.killed) {
+    console.log("🛑 [stopCurrentProcesses] yt-dlp 종료");
+    try {
+      currentProcesses.ytdlp.kill("SIGKILL");
+    } catch (err) {
+      console.log("⚠️ [stopCurrentProcesses] yt-dlp 종료 실패:", err.message);
+    }
+    currentProcesses.ytdlp = null;
+  }
+
+  // FFmpeg 프로세스 종료
+  if (currentProcesses.ffmpeg && !currentProcesses.ffmpeg.killed) {
+    console.log("🛑 [stopCurrentProcesses] FFmpeg 종료");
+    try {
+      currentProcesses.ffmpeg.kill("SIGKILL");
+    } catch (err) {
+      console.log("⚠️ [stopCurrentProcesses] FFmpeg 종료 실패:", err.message);
+    }
+    currentProcesses.ffmpeg = null;
+  }
+
+  console.log("✅ [stopCurrentProcesses] 정리 완료");
+}
+
 function createYouTubeStream(videoUrl) {
   console.log("🎧 [createYouTubeStream] 스트림 생성 시작");
 
-  // yt-dlp 옵션
-  const ytdlpArgs = ["-f", "bestaudio", "-o", "-"];
+  // 기존 프로세스 정리
+  stopCurrentProcesses();
 
-  // 쿠키가 있으면 추가
-  if (hasCookies) {
-    ytdlpArgs.push("--cookies", "./cookies.txt");
-  }
+  // 잠시 대기 (프로세스 종료 시간 확보)
+  return new Promise((resolve) => {
+    setTimeout(() => {
+      // yt-dlp 옵션
+      const ytdlpArgs = ["-f", "bestaudio", "-o", "-"];
 
-  ytdlpArgs.push(videoUrl);
+      // 쿠키가 있으면 추가
+      if (hasCookies) {
+        ytdlpArgs.push("--cookies", "./cookies.txt");
+      }
 
-  console.log("📝 [yt-dlp] 명령:", ytdlpArgs.join(" "));
+      ytdlpArgs.push(videoUrl);
 
-  const ytdlp = spawn("yt-dlp", ytdlpArgs);
+      console.log("📝 [yt-dlp] 명령:", ytdlpArgs.join(" "));
 
-  const ffmpeg = spawn("ffmpeg", [
-    "-i",
-    "pipe:0",
-    "-analyzeduration",
-    "0",
-    "-loglevel",
-    "error",
-    "-f",
-    "opus",
-    "-ar",
-    "48000",
-    "-ac",
-    "2",
-    "pipe:1",
-  ]);
+      const ytdlp = spawn("yt-dlp", ytdlpArgs);
+      const ffmpeg = spawn("ffmpeg", [
+        "-i",
+        "pipe:0",
+        "-analyzeduration",
+        "0",
+        "-loglevel",
+        "error",
+        "-f",
+        "opus",
+        "-ar",
+        "48000",
+        "-ac",
+        "2",
+        "pipe:1",
+      ]);
 
-  ytdlp.stdout.pipe(ffmpeg.stdin);
+      // 프로세스 저장
+      currentProcesses.ytdlp = ytdlp;
+      currentProcesses.ffmpeg = ffmpeg;
 
-  ytdlp.on("error", (error) => {
-    console.error("❌ [yt-dlp] 프로세스 에러:", error);
+      // 파이프 연결
+      ytdlp.stdout.pipe(ffmpeg.stdin);
+
+      // 에러 핸들링
+      ytdlp.on("error", (error) => {
+        if (error.code !== "EPIPE") {
+          console.error("❌ [yt-dlp] 프로세스 에러:", error);
+        }
+      });
+
+      ffmpeg.on("error", (error) => {
+        if (error.code !== "EPIPE") {
+          console.error("❌ [FFmpeg] 프로세스 에러:", error);
+        }
+      });
+
+      ytdlp.stderr.on("data", (data) => {
+        const msg = data.toString();
+        if (msg.includes("ERROR")) {
+          console.error("❌ [yt-dlp]:", msg);
+        }
+      });
+
+      ffmpeg.stderr.on("data", (data) => {
+        const msg = data.toString();
+        if (msg.includes("Error")) {
+          console.error("❌ [FFmpeg]:", msg);
+        }
+      });
+
+      // 프로세스 종료 시 정리
+      ytdlp.on("close", (code) => {
+        if (code !== 0 && code !== null) {
+          console.log(`⚠️ [yt-dlp] 종료, 코드: ${code}`);
+        }
+        if (currentProcesses.ytdlp === ytdlp) {
+          currentProcesses.ytdlp = null;
+        }
+      });
+
+      ffmpeg.on("close", (code) => {
+        if (code !== 0 && code !== null) {
+          console.log(`⚠️ [FFmpeg] 종료, 코드: ${code}`);
+        }
+        if (currentProcesses.ffmpeg === ffmpeg) {
+          currentProcesses.ffmpeg = null;
+        }
+      });
+
+      // 파이프 에러 핸들링 (EPIPE 무시)
+      ytdlp.stdout.on("error", (err) => {
+        if (err.code !== "EPIPE") {
+          console.error("❌ [yt-dlp stdout]:", err);
+        }
+      });
+
+      ffmpeg.stdin.on("error", (err) => {
+        if (err.code !== "EPIPE") {
+          console.error("❌ [FFmpeg stdin]:", err);
+        }
+      });
+
+      console.log("✅ [createYouTubeStream] 스트림 생성 완료");
+      resolve(ffmpeg.stdout);
+    }, 200); // 200ms 대기
   });
-
-  ffmpeg.on("error", (error) => {
-    console.error("❌ [FFmpeg] 프로세스 에러:", error);
-  });
-
-  ytdlp.stderr.on("data", (data) => {
-    const msg = data.toString();
-    if (msg.includes("ERROR")) {
-      console.error("❌ [yt-dlp]:", msg);
-    }
-  });
-
-  ffmpeg.stderr.on("data", (data) => {
-    console.error("❌ [FFmpeg]:", data.toString());
-  });
-
-  ytdlp.on("close", (code) => {
-    if (code !== 0) {
-      console.log(`⚠️ [yt-dlp] 종료, 코드: ${code}`);
-    }
-  });
-
-  ffmpeg.on("close", (code) => {
-    if (code !== 0) {
-      console.log(`⚠️ [FFmpeg] 종료, 코드: ${code}`);
-    }
-  });
-
-  console.log("✅ [createYouTubeStream] 스트림 생성 완료");
-  return ffmpeg.stdout;
 }
+
+// 플레이어 에러 핸들러 (한 번만 등록)
+player.on("error", (error) => {
+  console.error("❌ [플레이어] 에러:", error);
+  stopCurrentProcesses();
+});
 
 client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
   // 🛑 정지 커맨드
   if (interaction.commandName === "정지") {
-    player.stop();
+    stopCurrentProcesses();
     return interaction.reply("⏹️ 재생을 멈췄어요!");
   }
 
@@ -214,28 +300,44 @@ client.on(Events.InteractionCreate, async (interaction) => {
         adapterCreator: interaction.guild.voiceAdapterCreator,
       });
 
-      await entersState(connection, VoiceConnectionStatus.Ready, 30_000);
+      await entersState(connection, VoiceConnectionStatus.Ready, 30000);
 
-      // 스트림 생성 및 재생
-      const stream = createYouTubeStream(videoUrl);
+      // 스트림 생성 (Promise 반환)
+      const stream = await createYouTubeStream(videoUrl);
       const resource = createAudioResource(stream);
 
       player.play(resource);
       connection.subscribe(player);
 
+      // 상태 변경 리스너 (removeAllListeners로 중복 방지)
+      player.removeAllListeners(AudioPlayerStatus.Playing);
       player.once(AudioPlayerStatus.Playing, () => {
-        interaction.editReply(`🎶 **${query}** 재생 시작! 냠냠 🌰`);
-      });
-
-      player.on("error", (error) => {
-        console.error("❌ [플레이어] 에러:", error);
-        interaction.followUp("💥 재생 중 문제가 생겼어...");
+        console.log("🎶 [재생] 재생 중!");
+        interaction
+          .editReply(`🎶 **${query}** 재생 시작! 냠냠 🌰`)
+          .catch(() => {});
       });
     } catch (err) {
       console.error("❌ [재생] 에러:", err);
-      interaction.editReply("💥 도토리 떨어뜨렸어... 다시 시도해줘!");
+      stopCurrentProcesses();
+      interaction
+        .editReply("💥 도토리 떨어뜨렸어... 다시 시도해줘!")
+        .catch(() => {});
     }
   }
+});
+
+// 프로세스 종료 시 정리
+process.on("SIGINT", () => {
+  console.log("\n🛑 봇 종료 중...");
+  stopCurrentProcesses();
+  process.exit(0);
+});
+
+process.on("SIGTERM", () => {
+  console.log("\n🛑 봇 종료 중...");
+  stopCurrentProcesses();
+  process.exit(0);
 });
 
 /* ===============================
