@@ -7,6 +7,7 @@
 - 🎵 유튜브 노래 검색 및 재생
 - 🔗 유튜브 URL 직접 재생
 - ⏹️ 재생 정지
+- 🔄 재생 중 다른 곡으로 즉시 전환 가능
 
 ## 🛠️ 필수 요구사항
 
@@ -76,9 +77,9 @@ YOUTUBE_API_KEY=your_youtube_api_key
 4. "YouTube Data API v3" 검색 후 사용 설정
 5. "사용자 인증 정보" → "API 키 만들기"
 
-### 4. YouTube 쿠키 설정 (선택사항, 권장)
+### 4. YouTube 쿠키 설정 (필수)
 
-YouTube가 403 에러로 차단할 경우 필요해요:
+YouTube 403 에러 방지를 위해 쿠키 설정이 필요해요:
 
 1. Chrome에서 [Get cookies.txt LOCALLY](https://chrome.google.com/webstore/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc) 확장 프로그램 설치
 2. YouTube 로그인
@@ -112,6 +113,8 @@ node index.js
 /정지
 ```
 
+**💡 Tip:** 재생 중에 다른 노래를 `/재생`하면 즉시 전환돼요!
+
 ## 📁 프로젝트 구조
 
 ```
@@ -119,7 +122,8 @@ toribot/
 ├── index.js          # 메인 봇 파일
 ├── package.json      # 프로젝트 설정
 ├── .env             # 환경 변수 (직접 생성)
-├── cookies.txt      # YouTube 쿠키 (선택사항)
+├── cookies.txt      # YouTube 쿠키 (필수)
+├── .gitignore       # Git 제외 파일
 └── README.md        # 이 파일
 ```
 
@@ -127,7 +131,7 @@ toribot/
 
 ### 403 Forbidden 에러
 
-→ `cookies.txt` 파일을 추가하세요
+→ `cookies.txt` 파일을 추가하세요 (필수)
 
 ### "Cannot find module" 에러
 
@@ -135,11 +139,27 @@ toribot/
 
 ### 봇이 음성 채널에 들어오지만 소리가 안 나요
 
-→ FFmpeg와 yt-dlp가 설치되어 있는지 확인하세요
+→ FFmpeg와 yt-dlp가 PATH에 설치되어 있는지 확인하세요
 
 ### opusscript 관련 에러
 
 → `npm install opusscript` 실행
+
+### TimeoutNegativeWarning 경고
+
+→ 정상 작동하므로 무시해도 괜찮아요
+
+### 재생 중 다른 곡을 틀면 에러가 발생해요
+
+→ 최신 버전으로 업데이트하세요 (v1.0.0 이상)
+
+## 🔧 기술 스택
+
+- **discord.js** - 디스코드 봇 프레임워크
+- **@discordjs/voice** - 음성 재생
+- **yt-dlp** - 유튜브 다운로드
+- **FFmpeg** - 오디오 스트리밍
+- **googleapis** - 유튜브 검색 API
 
 ## 📝 라이선스
 
@@ -148,3 +168,7 @@ MIT License
 ## 💖 제작
 
 토리봇은 Claude와 함께 만들어졌어요! 🐿️🌰
+
+---
+
+⭐ 마음에 드셨다면 Star 부탁드려요!
