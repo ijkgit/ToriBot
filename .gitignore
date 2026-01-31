@@ -21,3 +21,12 @@ Thumbs.db
 *.swp
 *.swo
 *~
+
+# yt-dlp/ytdl-core 임시 파일
+*-player-script.js
+*.part
+*.ytdl
+*.temp
+
+# Discord.js 캐시
+.cache/
