@@ -52,8 +52,14 @@ let nowPlaying = {
   title: null,
   artist: null,
   videoUrl: null,
+  videoId: null,
   guildId: null,
 };
+
+// 재생 큐 시스템 (수동 추가용)
+let queue = [];
+let autoplayEnabled = true; // 자동재생 기본 활성화
+let currentConnection = null;
 
 // 쿠키 파일 확인
 const hasCookies = fs.existsSync("./cookies.txt");
@@ -92,6 +98,27 @@ const commands = [
     .setName("현재곡")
     .setDescription("🐿️ 현재 재생 중인 노래 정보를 보여줘요!")
     .toJSON(),
+
+  new SlashCommandBuilder()
+    .setName("큐")
+    .setDescription("🐿️ 재생 대기 목록을 보여줘요!")
+    .toJSON(),
+
+  new SlashCommandBuilder()
+    .setName("스킵")
+    .setDescription("🐿️ 다음 곡으로 넘어가요!")
+    .toJSON(),
+
+  new SlashCommandBuilder()
+    .setName("자동재생")
+    .setDescription("🐿️ 자동재생을 켜거나 꺼요!")
+    .addBooleanOption((option) =>
+      option
+        .setName("활성화")
+        .setDescription("자동재생 켜기/끄기")
+        .setRequired(true),
+    )
+    .toJSON(),
 ];
 
 const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN);
@@ -109,6 +136,147 @@ const youtube = google.youtube({
   version: "v3",
   auth: process.env.YOUTUBE_API_KEY,
 });
+
+/* ===============================
+   🎵 다음 추천 곡 (YouTube 스타일)
+================================ */
+
+// 재생 기록 추적 (전역 변수에 추가)
+let playHistory = []; // 최근 재생한 videoId 저장 (최대 20곡)
+async function getNextRecommendation(videoId) {
+  try {
+    console.log("🔍 [추천] 다음 곡 찾는 중... videoId:", videoId);
+
+    // videoId 유효성 검사
+    if (!videoId || videoId.length !== 11) {
+      console.log("❌ [추천] 유효하지 않은 videoId:", videoId);
+      return null;
+    }
+
+    if (nowPlaying.title) {
+      console.log("🔍 [추천] 곡 제목 기반 검색:", nowPlaying.title);
+
+      // 제목에서 핵심 키워드 추출
+      const { artist, title } = parseSongInfo(nowPlaying.title);
+
+      // 아티스트가 있으면 아티스트 기반, 없으면 제목의 첫 단어 기반
+      let searchQuery = artist || title.split(" ")[0];
+
+      // 너무 짧으면 전체 제목 사용
+      if (searchQuery.length < 3) {
+        searchQuery = title;
+      }
+
+      console.log("🔍 [추천] 검색 키워드:", searchQuery);
+
+      // 먼저 검색으로 videoId 목록 가져오기
+      const searchRes = await youtube.search.list({
+        part: ["snippet"],
+        q: searchQuery,
+        type: ["video"],
+        videoCategoryId: "10", // Music 카테고리만!
+        maxResults: 20,
+      });
+
+      if (!searchRes.data.items || searchRes.data.items.length === 0) {
+        console.log("❌ [추천] 검색 결과 없음");
+        return null;
+      }
+
+      // videoId 목록 추출
+      const videoIds = searchRes.data.items
+        .map((item) => item.id.videoId)
+        .filter((id) => id); // undefined 제거
+
+      if (videoIds.length === 0) {
+        console.log("❌ [추천] videoId 없음");
+        return null;
+      }
+
+      // videos.list로 상세 정보 가져오기 (카테고리 재확인)
+      const videosRes = await youtube.videos.list({
+        part: ["snippet", "contentDetails"],
+        id: videoIds,
+      });
+
+      if (!videosRes.data.items || videosRes.data.items.length === 0) {
+        console.log("❌ [추천] 비디오 정보 없음");
+        return null;
+      }
+
+      // Music 카테고리(10)만 필터링 + 재생 기록 제외
+      const excludeIds = [videoId, ...playHistory];
+      const musicVideos = videosRes.data.items.filter((video) => {
+        const isMusic = video.snippet.categoryId === "10";
+        const notPlayed = !excludeIds.includes(video.id);
+        const notLive = video.snippet.liveBroadcastContent === "none"; // 라이브 제외
+
+        return isMusic && notPlayed && notLive;
+      });
+
+      console.log(
+        `📊 [추천] 필터링: 전체 ${videosRes.data.items.length}개 → 음악 ${musicVideos.length}개`,
+      );
+
+      if (musicVideos.length === 0) {
+        console.log("❌ [추천] 필터링 후 결과 없음");
+        // 재생 기록 초기화하고 재시도
+        playHistory = [];
+        const retryFiltered = videosRes.data.items.filter((video) => {
+          const isMusic = video.snippet.categoryId === "10";
+          const notCurrent = video.id !== videoId;
+          const notLive = video.snippet.liveBroadcastContent === "none";
+          return isMusic && notCurrent && notLive;
+        });
+
+        if (retryFiltered.length === 0) {
+          return null;
+        }
+
+        const randomIndex = Math.floor(
+          Math.random() * Math.min(5, retryFiltered.length),
+        );
+        const selectedVideo = retryFiltered[randomIndex];
+
+        const video = {
+          videoId: selectedVideo.id,
+          title: selectedVideo.snippet.title,
+          url: `https://www.youtube.com/watch?v=${selectedVideo.id}`,
+        };
+
+        console.log(`✅ [추천] 다음 곡 (재시도): ${video.title}`);
+        return video;
+      }
+
+      // 랜덤하게 선택 (상위 5개 중)
+      const randomIndex = Math.floor(
+        Math.random() * Math.min(5, musicVideos.length),
+      );
+      const selectedVideo = musicVideos[randomIndex];
+
+      const video = {
+        videoId: selectedVideo.id,
+        title: selectedVideo.snippet.title,
+        url: `https://www.youtube.com/watch?v=${selectedVideo.id}`,
+      };
+
+      console.log(
+        `✅ [추천] 다음 곡: ${video.title} (카테고리: ${selectedVideo.snippet.categoryId})`,
+      );
+      return video;
+    }
+
+    return null;
+  } catch (error) {
+    console.error("❌ [추천] 에러:", error.message);
+
+    if (error.errors) {
+      console.error("❌ [추천] API 에러 상세:", error.errors);
+    }
+
+    return null;
+  }
+}
 
 /* ===============================
    🎵 가사 검색 - Genius.com
@@ -165,7 +333,6 @@ async function searchGeniusLyrics(artist, title) {
 
     const searchData = await searchResponse.json();
 
-    // 검색 결과에서 첫 번째 곡 찾기
     const songHits = searchData.response?.sections?.find(
       (s) => s.type === "song",
     )?.hits;
@@ -177,7 +344,6 @@ async function searchGeniusLyrics(artist, title) {
     const songUrl = songHits[0].result.url;
     console.log("🔗 [Genius] 곡 페이지:", songUrl);
 
-    // 가사 페이지 가져오기
     const lyricsResponse = await fetch(songUrl, {
       headers: {
         "User-Agent":
@@ -188,7 +354,6 @@ async function searchGeniusLyrics(artist, title) {
     const html = await lyricsResponse.text();
     const $ = cheerio.load(html);
 
-    // Genius의 가사 컨테이너 선택자들
     let lyrics = "";
     const lyricsSelectors = [
       'div[data-lyrics-container="true"]',
@@ -200,9 +365,7 @@ async function searchGeniusLyrics(artist, title) {
       const elements = $(selector);
       if (elements.length > 0) {
         elements.each((i, elem) => {
-          // <br> 태그를 줄바꿈으로 변환
           $(elem).find("br").replaceWith("\n");
-          // 텍스트 추출
           lyrics += $(elem).text() + "\n\n";
         });
         break;
@@ -229,15 +392,12 @@ async function searchLyrics(songInfo) {
 
   console.log("🔍 [searchLyrics] 가사 검색:", { artist, title });
 
-  // 1. 아티스트와 제목으로 검색
   let lyrics = await searchGeniusLyrics(artist, title);
   if (lyrics) return lyrics;
 
-  // 2. 제목만으로 검색
   lyrics = await searchGeniusLyrics("", title);
   if (lyrics) return lyrics;
 
-  // 3. 전체 제목으로 검색
   lyrics = await searchGeniusLyrics("", cleanSongTitle(songInfo));
   if (lyrics) return lyrics;
 
@@ -380,15 +540,99 @@ function createYouTubeStream(videoUrl) {
   });
 }
 
+async function playSong(videoUrl, videoTitle, videoId, guildId) {
+  try {
+    // URL에서 videoId 추출 (videoId가 제대로 안 넘어왔을 경우 대비)
+    if (!videoId || videoId.length !== 11) {
+      console.log("⚠️ [playSong] videoId 재추출 시도");
+      try {
+        const url = new URL(videoUrl);
+        videoId = url.searchParams.get("v");
+        console.log("✅ [playSong] videoId 재추출 성공:", videoId);
+      } catch (err) {
+        console.error("❌ [playSong] videoId 추출 실패:", err);
+      }
+    }
+
+    const { artist, title } = parseSongInfo(videoTitle);
+    nowPlaying.title = videoTitle;
+    nowPlaying.artist = artist;
+    nowPlaying.videoUrl = videoUrl;
+    nowPlaying.videoId = videoId;
+    nowPlaying.guildId = guildId;
+
+    // 재생 기록에 추가
+    if (videoId) {
+      playHistory.push(videoId);
+      // 최대 20곡만 유지
+      if (playHistory.length > 20) {
+        playHistory.shift();
+      }
+      console.log(
+        "📝 [playSong] 재생 기록에 추가. 총:",
+        playHistory.length,
+        "곡",
+      );
+    }
+
+    console.log("📝 [playSong] nowPlaying.videoId:", nowPlaying.videoId);
+
+    const stream = await createYouTubeStream(videoUrl);
+    const resource = createAudioResource(stream);
+
+    player.play(resource);
+
+    console.log(`🎶 [playSong] 재생 시작: ${videoTitle}`);
+  } catch (error) {
+    console.error("❌ [playSong] 에러:", error);
+    throw error;
+  }
+}
+
+async function playNextInQueue() {
+  // 수동 큐가 있으면 우선 재생
+  if (queue.length > 0) {
+    const nextSong = queue.shift();
+    console.log(`▶️ [큐] 다음 곡 재생: ${nextSong.title}`);
+    await playSong(
+      nextSong.url,
+      nextSong.title,
+      nextSong.videoId,
+      nowPlaying.guildId,
+    );
+    return;
+  }
+
+  // 자동재생이 활성화되어 있으면 추천 곡 재생
+  if (autoplayEnabled && nowPlaying.videoId) {
+    console.log("🔄 [자동재생] 다음 추천 곡 찾는 중...");
+
+    const nextVideo = await getNextRecommendation(nowPlaying.videoId);
+
+    if (nextVideo) {
+      console.log(`✅ [자동재생] 다음 곡: ${nextVideo.title}`);
+      await playSong(
+        nextVideo.url,
+        nextVideo.title,
+        nextVideo.videoId,
+        nowPlaying.guildId,
+      );
+    } else {
+      console.log("📭 [자동재생] 추천 곡 없음");
+    }
+  }
+}
+
 player.on("error", (error) => {
   console.error("❌ [플레이어] 에러:", error);
   stopCurrentProcesses();
+  playNextInQueue().catch(console.error);
 });
 
-// ✅ Idle 이벤트에서 nowPlaying 초기화 제거
 player.on(AudioPlayerStatus.Idle, () => {
   console.log("🔚 [플레이어] 재생 종료");
-  // nowPlaying은 정지 명령어나 다음 곡 재생 시에만 업데이트
+  // YouTube처럼 다음 추천 곡 자동 재생
+  playNextInQueue().catch(console.error);
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
@@ -396,11 +640,66 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
   if (interaction.commandName === "정지") {
     stopCurrentProcesses();
+    queue = [];
+    playHistory = []; // 재생 기록도 초기화
     nowPlaying.title = null;
     nowPlaying.artist = null;
     nowPlaying.videoUrl = null;
+    nowPlaying.videoId = null;
     nowPlaying.guildId = null;
+    if (currentConnection) {
+      currentConnection.destroy();
+      currentConnection = null;
+    }
     return interaction.reply("⏹️ 재생을 멈췄어요!");
+  }
+
+  if (interaction.commandName === "스킵") {
+    if (!nowPlaying.title || nowPlaying.guildId !== interaction.guildId) {
+      return interaction.reply({
+        content: "🐿️ 지금은 아무 노래도 안 틀고 있어요!",
+        flags: 64,
+      });
+    }
+
+    await interaction.reply("⏭️ 다음 곡으로 넘어가요!");
+    player.stop();
+    return;
+  }
+
+  if (interaction.commandName === "자동재생") {
+    autoplayEnabled = interaction.options.getBoolean("활성화");
+    return interaction.reply(
+      autoplayEnabled
+        ? "✅ 자동재생이 활성화되었어요! 곡이 끝나면 YouTube처럼 추천 곡을 자동으로 재생해요."
+        : "❌ 자동재생이 비활성화되었어요.",
+    );
+  }
+
+  if (interaction.commandName === "큐") {
+    if (queue.length === 0) {
+      return interaction.reply({
+        content: "📭 대기 중인 곡이 없어요!",
+        flags: 64,
+      });
+    }
+
+    const queueList = queue
+      .slice(0, 10)
+      .map((song, index) => `${index + 1}. ${song.title}`)
+      .join("\n");
+
+    const embed = new EmbedBuilder()
+      .setColor(0xf59e42)
+      .setTitle("📋 재생 대기 목록")
+      .setDescription(
+        queueList +
+          (queue.length > 10 ? `\n... 외 ${queue.length - 10}곡` : ""),
+      )
+      .setFooter({ text: `총 ${queue.length}곡 | 토리봇 🐿️🌰` })
+      .setTimestamp();
+
+    return interaction.reply({ embeds: [embed] });
   }
 
   if (interaction.commandName === "현재곡") {
@@ -411,12 +710,21 @@ client.on(Events.InteractionCreate, async (interaction) => {
       });
     }
 
+    const queueInfo =
+      queue.length > 0
+        ? `\n📋 대기 중: ${queue.length}곡`
+        : autoplayEnabled
+          ? "\n🔄 자동재생: 다음 곡 자동 추천"
+          : "";
+
     const embed = new EmbedBuilder()
       .setColor(0xf59e42)
       .setTitle("🎵 현재 재생 중")
-      .setDescription(`**${nowPlaying.title}**`)
+      .setDescription(`**${nowPlaying.title}**${queueInfo}`)
       .setURL(nowPlaying.videoUrl)
-      .setFooter({ text: "토리봇 🐿️🌰" })
+      .setFooter({
+        text: `자동재생: ${autoplayEnabled ? "ON" : "OFF"} | 토리봇 🐿️🌰`,
+      })
       .setTimestamp();
 
     return interaction.reply({ embeds: [embed] });
@@ -502,14 +810,18 @@ client.on(Events.InteractionCreate, async (interaction) => {
     try {
       let videoUrl;
       let videoTitle;
+      let videoId;
 
       if (query.includes("youtube.com") || query.includes("youtu.be")) {
         videoUrl = query;
 
-        let videoId;
         if (query.includes("youtube.com")) {
-          const urlParams = new URLSearchParams(new URL(query).search);
-          videoId = urlParams.get("v");
+          try {
+            const url = new URL(query);
+            videoId = url.searchParams.get("v");
+          } catch (err) {
+            return interaction.editReply("❌ 올바른 YouTube URL이 아니에요...");
+          }
         } else {
           videoId = query.split("youtu.be/")[1]?.split("?")[0];
         }
@@ -529,13 +841,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
           q: query,
           maxResults: 1,
           type: ["video"],
+          videoCategoryId: "10", // Music 카테고리만!
         });
 
         if (!res.data.items || res.data.items.length === 0) {
           return interaction.editReply("❌ 도토리를 못 찾았어...");
         }
 
-        const videoId = res.data.items[0].id?.videoId;
+        videoId = res.data.items[0].id?.videoId;
         videoTitle = res.data.items[0].snippet?.title || query;
 
         if (!videoId) {
@@ -545,52 +858,51 @@ client.on(Events.InteractionCreate, async (interaction) => {
         videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
       }
 
-      const { artist, title } = parseSongInfo(videoTitle);
-      nowPlaying.title = videoTitle;
-      nowPlaying.artist = artist;
-      nowPlaying.videoUrl = videoUrl;
-      nowPlaying.guildId = interaction.guildId;
+      console.log("🎬 [재생] videoId:", videoId);
 
-      const connection = joinVoiceChannel({
-        channelId: voiceChannel.id,
-        guildId: interaction.guild.id,
-        adapterCreator: interaction.guild.voiceAdapterCreator,
-      });
+      // 음성 채널 연결
+      if (
+        !currentConnection ||
+        currentConnection.state.status === VoiceConnectionStatus.Disconnected
+      ) {
+        currentConnection = joinVoiceChannel({
+          channelId: voiceChannel.id,
+          guildId: interaction.guild.id,
+          adapterCreator: interaction.guild.voiceAdapterCreator,
+        });
 
-      const READY_TIMEOUT = 30000;
+        try {
+          await entersState(
+            currentConnection,
+            VoiceConnectionStatus.Ready,
+            30000,
+          );
+        } catch (error) {
+          console.error("❌ [연결] 타임아웃:", error);
+          currentConnection.destroy();
+          currentConnection = null;
+          return interaction.editReply("❌ 음성 채널 연결에 실패했어요...");
+        }
 
-      try {
-        await entersState(
-          connection,
-          VoiceConnectionStatus.Ready,
-          READY_TIMEOUT,
-        );
-      } catch (error) {
-        console.error("❌ [연결] 타임아웃:", error);
-        connection.destroy();
-        return interaction.editReply("❌ 음성 채널 연결에 실패했어요...");
+        currentConnection.subscribe(player);
       }
 
-      const stream = await createYouTubeStream(videoUrl);
-      const resource = createAudioResource(stream);
-
-      player.play(resource);
-      connection.subscribe(player);
+      // 즉시 재생
+      await playSong(videoUrl, videoTitle, videoId, interaction.guildId);
 
       player.removeAllListeners(AudioPlayerStatus.Playing);
       player.once(AudioPlayerStatus.Playing, () => {
         console.log("🎶 [재생] 재생 중!");
+        const autoplayMsg = autoplayEnabled
+          ? "\n🔄 곡이 끝나면 자동으로 추천 곡을 재생해요!"
+          : "";
         interaction
-          .editReply(`🎶 **${videoTitle}** 재생 시작! 냠냠 🌰`)
+          .editReply(`🎶 **${videoTitle}** 재생 시작! 냠냠 🌰${autoplayMsg}`)
           .catch(() => {});
       });
     } catch (err) {
       console.error("❌ [재생] 에러:", err);
       stopCurrentProcesses();
-      nowPlaying.title = null;
-      nowPlaying.artist = null;
-      nowPlaying.videoUrl = null;
-      nowPlaying.guildId = null;
       interaction
         .editReply("💥 도토리 떨어뜨렸어... 다시 시도해줘!")
         .catch(() => {});
@@ -601,12 +913,18 @@ client.on(Events.InteractionCreate, async (interaction) => {
 process.on("SIGINT", () => {
   console.log("\n🛑 봇 종료 중...");
   stopCurrentProcesses();
+  if (currentConnection) {
+    currentConnection.destroy();
+  }
   process.exit(0);
 });
 
 process.on("SIGTERM", () => {
   console.log("\n🛑 봇 종료 중...");
   stopCurrentProcesses();
+  if (currentConnection) {
+    currentConnection.destroy();
+  }
   process.exit(0);
 });
 
